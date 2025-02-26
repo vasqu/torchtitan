@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from glob import glob
+from os.path import join as pathjoin
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -30,6 +32,16 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
     return sample["text"]
 
 
+def _load_local_jsonl(dataset_path: str):
+    """Load local dataset by processing jsonl files in a given directory"""
+    return load_dataset(
+        'json',
+        data_files=glob(pathjoin(dataset_path, '*jsonl')),
+        split='train',
+        streaming=True,
+    )
+
+
 @dataclass
 class DatasetConfig:
     path: str
@@ -49,6 +61,11 @@ DATASETS = {
         loader=lambda path: load_dataset(path, split="train"),
         text_processor=_process_c4_text,
     ),
+    "local_jsonl": DatasetConfig(
+        path='assets/jsonl_dataset',
+        loader=_load_local_jsonl,
+        text_processor=_process_c4_text,
+    )
 }
 
 
