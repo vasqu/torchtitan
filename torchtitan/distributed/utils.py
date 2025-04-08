@@ -7,8 +7,8 @@
 import contextlib
 import math
 import os
+from collections.abc import Generator, Iterable
 from datetime import timedelta
-from typing import Generator, Iterable, List, Optional, Set, Union
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -17,11 +17,15 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
+from torchtitan.components.ft import ft_clip_grad_norm_util, ft_dist_reduce
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
 
 def _dist_reduce(x: torch.Tensor, reduceOp: str, mesh: DeviceMesh) -> float:
+    # Remove FT replicate dimension if it exists.
+    x, reduceOp, mesh = ft_dist_reduce(x, reduceOp, mesh)
+
     if isinstance(x, DTensor):
         # functional collectives do not support DTensor inputs
         x = x.full_tensor()
@@ -38,9 +42,9 @@ def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
 
 
 def set_determinism(
-    world_mesh: Optional[DeviceMesh],
+    world_mesh: DeviceMesh | None,
     device: torch.device,
-    seed: Optional[int] = None,
+    seed: int | None = None,
     deterministic: bool = False,
 ) -> None:
     """
@@ -108,9 +112,9 @@ def set_determinism(
 
 def create_context_parallel_ctx(
     cp_mesh: DeviceMesh,
-    cp_buffers: List[torch.Tensor],
-    cp_seq_dims: List[int],
-    cp_no_restore_buffers: Set[torch.Tensor],
+    cp_buffers: list[torch.Tensor],
+    cp_seq_dims: list[int],
+    cp_no_restore_buffers: set[torch.Tensor],
     cp_rotate_method: str,
 ):
     try:
@@ -131,9 +135,11 @@ def create_context_parallel_ctx(
     )
 
 
-def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool):
+def get_train_context(
+    enable_loss_parallel: bool, enable_compiled_autograd: bool
+) -> Generator[None, None, None]:
     @contextlib.contextmanager
-    def context(cp_context: Optional[Generator[None, None, None]] = None):
+    def context(cp_context: Generator[None, None, None] | None = None):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
@@ -146,11 +152,13 @@ def get_train_context(enable_loss_parallel: bool, enable_compiled_autograd: bool
             if cp_context is not None:
                 from torch.nn.attention import sdpa_kernel, SDPBackend
 
-                # currently we only support these two SDP backends.
-                # TODO (xilunwu): support cuDNN backend
                 stack.enter_context(
                     sdpa_kernel(
-                        [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION]
+                        [
+                            SDPBackend.FLASH_ATTENTION,
+                            SDPBackend.EFFICIENT_ATTENTION,
+                            SDPBackend.CUDNN_ATTENTION,
+                        ]
                     )
                 )
                 stack.enter_context(cp_context)
@@ -170,7 +178,7 @@ def init_distributed(job_config):
 
     def _get_distributed_backend(job_config):
         backend = "nccl"
-        if device_type in torch.distributed.Backend.default_device_backend_map.keys():
+        if device_type in torch.distributed.Backend.default_device_backend_map:
             backend = torch.distributed.Backend.default_device_backend_map.get(
                 device_type
             )
@@ -239,12 +247,12 @@ def set_pg_timeouts(timeout, world_mesh):
 
 @torch.no_grad()
 def clip_grad_norm_(
-    parameters: Union[torch.Tensor, Iterable[torch.Tensor]],
+    parameters: torch.Tensor | Iterable[torch.Tensor],
     max_norm: float,
     norm_type: float = 2.0,
     error_if_nonfinite: bool = False,
-    foreach: Optional[bool] = None,
-    pp_mesh: Optional[DeviceMesh] = None,
+    foreach: bool | None = None,
+    pp_mesh: DeviceMesh | None = None,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -286,6 +294,9 @@ def clip_grad_norm_(
     if isinstance(total_norm, DTensor):
         # Will reach here if any non-PP parallelism is used.
         # If only using PP, total_norm will be a local tensor.
+
+        # Remove FT replicate dimension if it exists.
+        total_norm = ft_clip_grad_norm_util(total_norm)
         total_norm = total_norm.full_tensor()
 
     if pp_mesh is not None:

@@ -13,8 +13,6 @@
 # Note: Performance
 # Float8 experimental is intended to be ran under `torch.compile`` for competitive performance
 
-from typing import List, Union
-
 import torch
 import torch.nn as nn
 
@@ -49,30 +47,52 @@ class Float8Converter(ModelConverter):
                 "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
 
-        # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
-        enable_fsdp_float8_all_gather = (
-            parallel_dims.dp_shard_enabled
-            and float8_config.enable_fsdp_float8_all_gather
-        )
-        self.config = Float8LinearConfig(
-            enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
-            force_recompute_fp8_weight_in_bwd=float8_config.force_recompute_fp8_weight_in_bwd,
-        )
+        if float8_config.recipe_name is not None and not hasattr(
+            Float8LinearConfig, "from_recipe_name"
+        ):
+            logger.warning(
+                "Failed to swap to Float8Linear with recipe lookup because the torchao version "
+                "is too old, please install torchao v0.9.0 or later and try again",
+            )
+            return
 
         self.enabled = True
+        self.filter_fqns = float8_config.filter_fqns
 
-        # for precompute_float8_dynamic_scale_for_fsdp
-        self.precompute_scale = (
-            enable_fsdp_float8_all_gather
-            and float8_config.precompute_float8_dynamic_scale_for_fsdp
-        )
+        if float8_config.recipe_name is not None:
+            assert (
+                not float8_config.enable_fsdp_float8_all_gather
+            ), "using `float8_config.enable_fsdp_float8_all_gather` together with `float8_config.recipe_name` is not supported"
+            assert (
+                not float8_config.force_recompute_fp8_weight_in_bwd
+            ), "using `float8_config.force_recompute_fp8_weight_in_bwd` together with `float8_config.recipe_name` is not supported"
+            self.config = Float8LinearConfig.from_recipe_name(float8_config.recipe_name)
+            self.precompute_scale = False
+            logger.info(
+                f"Float8 training active with recipe {float8_config.recipe_name}"
+            )
 
-        logger.info("Float8 training active")
+        else:
+            # Mutates the model inplace replacing instances of torch.nn.Linear with Float8Linear
+            enable_fsdp_float8_all_gather = (
+                parallel_dims.dp_shard_enabled
+                and float8_config.enable_fsdp_float8_all_gather
+            )
+            self.config = Float8LinearConfig(
+                enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
+                force_recompute_fp8_weight_in_bwd=float8_config.force_recompute_fp8_weight_in_bwd,
+            )
+            # for precompute_float8_dynamic_scale_for_fsdp
+            self.precompute_scale = (
+                enable_fsdp_float8_all_gather
+                and float8_config.precompute_float8_dynamic_scale_for_fsdp
+            )
+            logger.info("Float8 tensorwise scaled training active")
 
     def convert(self, model: nn.Module):
         return self.convert_to_float8_training(model)
 
-    def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         return self.precompute_float8_dynamic_scale_for_fsdp(model)
 
     def convert_to_float8_training(self, model: nn.Module):
@@ -90,15 +110,29 @@ class Float8Converter(ModelConverter):
         convert_to_float8_training(
             model,
             config=self.config,
-            module_filter_fn=lambda mod, fqn: fqn != "output",
+            module_filter_fn=self._module_filter_fn,
         )
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.config.enable_fsdp_float8_all_gather}"
         )
 
+    def _module_filter_fn(self, mod: nn.Module, fqn: str) -> bool:
+        if not isinstance(mod, nn.Linear):
+            return False
+
+        # All dims must be divisible by 16 due to float8 tensorcore hardware requirements.
+        dims_multiples_of_16 = (
+            mod.weight.shape[0] % 16 == 0 and mod.weight.shape[1] % 16 == 0
+        )
+
+        # If the fqn matches any filtered fqn, then we should not convert this module.
+        is_filtered_fqn = any(filtered_fqn in fqn for filtered_fqn in self.filter_fqns)
+
+        return dims_multiples_of_16 and not is_filtered_fqn
+
     def precompute_float8_dynamic_scale_for_fsdp(
-        self, model: Union[nn.Module, List[nn.Module]]
+        self, model: nn.Module | list[nn.Module]
     ):
         if not self.enabled:
             return

@@ -5,10 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import gc
-import importlib
-import os
 import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -49,32 +46,7 @@ class GarbageCollection:
         logger.info("[GC] %s %.2f seconds.", reason, time.monotonic() - begin)
 
 
-def get_num_params(model: torch.nn.Module, exclude_embedding: bool = False) -> int:
-    num_params = sum(p.numel() for p in model.parameters())
-    if exclude_embedding:
-        num_params -= sum(p.numel() for p in model.tok_embeddings.parameters())
-    return num_params
-
-
-def get_num_flop_per_token(num_params: int, model_config, seq_len) -> int:
-    l, h, q, t = (
-        model_config.n_layers,
-        model_config.n_heads,
-        model_config.dim // model_config.n_heads,
-        seq_len,
-    )
-    # Reasoning behind the factor of 12 for the self-attention part of the formula:
-    # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
-    # 2. the flash attention does 1 more matmul recomputation in the backward
-    #    but recomputation should not be counted in calculating MFU           (+0)
-    # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
-    # 4. we follow the convention and do not account for sparsity in causal attention
-    flop_per_token = 6 * num_params + 12 * l * h * q * t
-
-    return flop_per_token
-
-
-# hardcoded BF16 type peak flops for NVIDIA A100, H100, and H200 GPU
+# hardcoded BF16 type peak flops for NVIDIA A100, H100, H200 GPU and AMD MI250, MI300X, AMD MI325X and Intel PVC
 def get_peak_flops(device_name: str) -> int:
     try:
         # Run the lspci command and capture the output
@@ -104,6 +76,23 @@ def get_peak_flops(device_name: str) -> int:
     elif "H200" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/h200/
         return 989e12
+    elif "MI300X" in device_name or "MI325X" in device_name:
+        # MI300X data from https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html
+        # MI325X data from https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html
+        return 1300e12
+    elif "MI250X" in device_name:
+        # data from https://www.amd.com/en/products/accelerators/instinct/mi200/mi250x.html (per GCD)
+        return 191.5e12
+    elif "Data Center GPU Max 1550" in device_name:
+        # Also known as Ponte Vecchio (PVC).
+        # data from https://www.intel.com/content/www/us/en/docs/oneapi/optimization-guide-gpu/2025-0/intel-xe-gpu-architecture.html
+        # Dot Product Accumulate Systolic (DPAS):
+        # - Freq: 1300MHz
+        # - #ops: 512
+        # Full EU mode (i.e. 512 max compute units): 340.8 TFLOPS (BF16)
+        # Standard EU mode (i.e. 448 max compute units): 298.2 TFLOPS (BF16)
+        max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
+        return 512 * max_comp_units * 1300 * 10**6
     else:  # for other GPU types, assume A100
         logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
         return 312e12
@@ -152,36 +141,3 @@ def check_if_feature_in_pytorch(
             f"{min_nightly_version}. Please upgrade a newer version to include the "
             f"change in ({pull_request_link}) for correct {feature_name}."
         )
-
-
-def import_module_from_path(path: str):
-    path = os.path.expanduser(path)
-
-    # 1. Check if path is an existing file or directory path.
-    if os.path.exists(path):
-        if not os.path.isdir(path):
-            raise ImportError(f"Path '{path}' is not a directory.")
-        init_file = os.path.join(path, "__init__.py")
-        if os.path.isfile(init_file):
-            return _import_module_from_init(path)
-
-        raise ImportError(
-            f"Directory '{path}' is not a Python package because it does not "
-            "contain an __init__.py file."
-        )
-
-    # 2. If not a valid path, assume it's a dotted module name.
-    return importlib.import_module(path)
-
-
-def _import_module_from_init(path: str):
-    init_file = os.path.join(path, "__init__.py")
-    module_name = os.path.basename(path)
-    spec = importlib.util.spec_from_file_location(module_name, init_file)
-    if spec is None:
-        raise ImportError(f"Could not create spec from '{init_file}'")
-
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module

@@ -7,7 +7,7 @@
 from glob import glob
 from os.path import join as pathjoin
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import torch
 
@@ -70,7 +70,7 @@ DATASETS = {
 
 
 def _validate_dataset(
-    dataset_name: str, dataset_path: str = None
+    dataset_name: str, dataset_path: str | None = None
 ) -> tuple[str, Callable, Callable]:
     """Validate dataset name and path."""
     if dataset_name not in DATASETS:
@@ -89,7 +89,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
     def __init__(
         self,
         dataset_name: str,
-        dataset_path: Optional[str],
+        dataset_path: str | None,
         tokenizer: Tokenizer,
         seq_len: int = 2048,
         dp_rank: int = 0,
@@ -141,7 +141,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
                     self._all_tokens = self._all_tokens[max_buffer_token_len:]
                     input = x[:-1]
                     label = x[1:]
-                    yield input, label
+                    yield {"input": input}, label
 
             if not self.infinite:
                 logger.warning(f"Dataset {self.dataset_name} has run out of data")
