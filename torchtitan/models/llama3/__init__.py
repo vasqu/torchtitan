@@ -39,6 +39,8 @@ llama3_configs = {
         ffn_dim_multiplier=1.3,
         multiple_of=1024,
         rope_theta=500000,
+        # TODO manually set vocab size
+        vocab_size=32064,
     ),
     "70B": TransformerModelArgs(
         dim=8192,

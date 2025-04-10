@@ -62,6 +62,7 @@ DATASETS = {
         text_processor=_process_c4_text,
     ),
     "local_jsonl": DatasetConfig(
+        # TODO insert custom path
         path='assets/jsonl_dataset',
         loader=_load_local_jsonl,
         text_processor=_process_c4_text,

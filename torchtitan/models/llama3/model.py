@@ -45,7 +45,8 @@ class TransformerModelArgs(BaseModelArgs):
 
     def update_from_config(self, job_config: JobConfig, tokenizer: Tokenizer) -> None:
         self.norm_type = job_config.model.norm_type
-        self.vocab_size = tokenizer.n_words
+        # we don't want this
+        #self.vocab_size = tokenizer.n_words
         self.max_seq_len = job_config.training.seq_len
         self.use_flex_attn = job_config.model.use_flex_attn
         self.attn_mask_type = job_config.model.attn_mask_type
