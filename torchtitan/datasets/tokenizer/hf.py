@@ -15,6 +15,7 @@ from typing import (
 from transformers import AutoTokenizer
 
 from torchtitan.components.tokenizer import Tokenizer
+from torchtitan.config_manager import JobConfig
 from torchtitan.tools.logging import logger
 
 
@@ -61,7 +62,7 @@ class HfTokenizer(Tokenizer):
         assert type(s) is str
 
         input_ids = self.tokenizer(
-            s, add_special_tokens=False, truncation=False,
+            s, add_special_tokens=False, truncation=False, padding=False,
         )['input_ids']
 
         if bos:
@@ -82,3 +83,7 @@ class HfTokenizer(Tokenizer):
             str: The decoded string.
         """
         return self.tokenizer.decode(ids)
+
+
+def build_hf_tokenizer(job_config: JobConfig) -> HfTokenizer:
+    return HfTokenizer(job_config.model.tokenizer_path)
